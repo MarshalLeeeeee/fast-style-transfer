@@ -11,6 +11,8 @@ import time
 import json
 import subprocess
 import numpy
+import imageio
+imageio.plugins.ffmpeg.download()
 from moviepy.video.io.VideoFileClip import VideoFileClip
 import moviepy.video.io.ffmpeg_writer as ffmpeg_writer
 

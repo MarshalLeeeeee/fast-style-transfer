@@ -3,6 +3,7 @@ import functools
 import vgg, pdb, time
 import tensorflow as tf, numpy as np, os
 import transform
+import tamura
 from utils import get_img
 
 STYLE_LAYERS = ('relu1_1', 'relu2_1', 'relu3_1', 'relu4_1', 'relu5_1')
@@ -11,7 +12,7 @@ DEVICES = 'CUDA_VISIBLE_DEVICES'
 
 # np arr, np arr
 def optimize(content_targets, style_target, content_weight, style_weight,
-             tv_weight, vgg_path, epochs=2, print_iterations=1000,
+             tv_weight, fcrs_weight, fcon_weight, fdir_weight, vgg_path, epochs=2, print_iterations=1000,
              batch_size=4, save_path='saver/fns.ckpt', slow=False,
              learning_rate=1e-3, debug=False):
     if slow:
@@ -19,13 +20,39 @@ def optimize(content_targets, style_target, content_weight, style_weight,
     mod = len(content_targets) % batch_size
     if mod > 0:
         print("Train set has been trimmed slightly..")
-        content_targets = content_targets[:-mod] 
+        content_targets = content_targets[:-mod]
 
     style_features = {}
-
     batch_shape = (batch_size,256,256,3)
     style_shape = (1,) + style_target.shape
     print(style_shape)
+    prop = [1.0,2.0,16.0,2.0,1.0]
+
+    # precomputer content texture measurement
+    if batch_size == 1:
+        with tf.Graph().as_default(), tf.Session() as sess:
+            content_image = tf.placeholder(tf.float32, shape=batch_shape, name='content_image')
+            image = np.zeros(batch_shape, dtype=np.float32)
+            image[0] = get_img(content_targets[0], (256,256,3)).astype(np.float32)
+            fcrs = tamura.coarseness(content_image)
+            fcon = tamura.contrast(content_image)
+            fdir= tamura.directionality(content_image)
+            content_fcrs = fcrs.eval(feed_dict={content_image:image})
+            content_fcon = fcon.eval(feed_dict={content_image:image})
+            content_fdir = fdir.eval(feed_dict={content_image:image})
+
+    # precompute style texture features
+    with tf.Graph().as_default(), tf.Session() as sess:
+        style_image = tf.placeholder(tf.float32, shape=style_shape, name='style_image')
+        image = np.zeros(batch_shape, dtype=np.float32)
+        image = np.array([style_target])
+        fcrs = tamura.coarseness(style_image)
+        fcon = tamura.contrast(style_image)
+        fdir= tamura.directionality(style_image)
+        style_fcrs = fcrs.eval(feed_dict={style_image:image})
+        style_fcon = fcon.eval(feed_dict={style_image:image})
+        style_fdir = fdir.eval(feed_dict={style_image:image})        
+
 
     # precompute style features
     with tf.Graph().as_default(), tf.device('/cpu:0'), tf.Session() as sess:
@@ -66,7 +93,9 @@ def optimize(content_targets, style_target, content_weight, style_weight,
         )
 
         style_losses = []
-        for style_layer in STYLE_LAYERS:
+        #for style_layer in STYLE_LAYERS:
+        for i in range(5):
+            style_layer = STYLE_LAYERS[i]
             layer = net[style_layer]
             bs, height, width, filters = map(lambda i:i.value,layer.get_shape())
             size = height * width * filters
@@ -74,7 +103,7 @@ def optimize(content_targets, style_target, content_weight, style_weight,
             feats_T = tf.transpose(feats, perm=[0,2,1])
             grams = tf.matmul(feats_T, feats) / size
             style_gram = style_features[style_layer]
-            style_losses.append(2 * tf.nn.l2_loss(grams - style_gram)/style_gram.size)
+            style_losses.append(2 * prop[i] * tf.nn.l2_loss(grams - style_gram)/style_gram.size)
 
         style_loss = style_weight * functools.reduce(tf.add, style_losses) / batch_size
 
@@ -85,15 +114,27 @@ def optimize(content_targets, style_target, content_weight, style_weight,
         x_tv = tf.nn.l2_loss(preds[:,:,1:,:] - preds[:,:,:batch_shape[2]-1,:])
         tv_loss = tv_weight*2*(x_tv/tv_x_size + y_tv/tv_y_size)/batch_size
 
-        loss = content_loss + style_loss + tv_loss
+        # tamura loss
+        pred_fcrs = tamura.coarseness(preds_pre)
+        pred_fcon = tamura.contrast(preds_pre)
+        pred_fdir = tamura.directionality(preds_pre)
+        fcrs_loss = fcrs_weight * 2 * tf.nn.l2_loss(pred_fcrs - style_fcrs)
+        fcon_loss = fcon_weight * 2 * tf.nn.l2_loss(pred_fcon - style_fcon)
+        fdir_loss = fdir_weight * 2 * tf.nn.l2_loss(pred_fdir - style_fdir)
+
+        loss = content_loss + style_loss + tv_loss + fcrs_loss + fcon_loss + fdir_loss
 
         # overall loss
+        global_step = tf.Variable(0, trainable=False)
+        add_global = global_step.assign_add(1)
+        lr = tf.train.exponential_decay(learning_rate,global_step=global_step,decay_steps=10,decay_rate=0.9)
         train_step = tf.train.AdamOptimizer(learning_rate).minimize(loss)
         sess.run(tf.global_variables_initializer())
         import random
         uid = random.randint(1, 100)
         print("UID: %s" % uid)
         for epoch in range(epochs):
+            #sess.run(add_global)
             num_examples = len(content_targets)
             iterations = 0
             while iterations * batch_size < num_examples:
@@ -122,20 +163,23 @@ def optimize(content_targets, style_target, content_weight, style_weight,
                 is_last = epoch == epochs - 1 and iterations * batch_size >= num_examples
                 should_print = is_print_iter or is_last
                 if should_print:
-                    to_get = [style_loss, content_loss, tv_loss, loss, preds]
+                    to_get = [style_loss, content_loss, tv_loss, fcrs_loss, fcon_loss, fdir_loss, loss, preds, lr, global_step]
+                    #to_get = [style_loss, content_loss, tv_loss, fcrs_loss, fcon_loss, fdir_loss, loss, preds]
                     test_feed_dict = {
                        X_content:X_batch
                     }
 
                     tup = sess.run(to_get, feed_dict = test_feed_dict)
-                    _style_loss,_content_loss,_tv_loss,_loss,_preds = tup
-                    losses = (_style_loss, _content_loss, _tv_loss, _loss)
+                    _style_loss,_content_loss,_tv_loss,_fcrs_loss,_fcon_loss,_fdir_loss,_loss,_preds,_lr,_global_step = tup
+                    #_style_loss,_content_loss,_tv_loss,_fcrs_loss,_fcon_loss,_fdir_loss,_loss,_preds = tup
+                    losses = (_style_loss, _content_loss, _tv_loss, _fcrs_loss, _fcon_loss, _fdir_loss, _loss)
                     if slow:
                        _preds = vgg.unprocess(_preds)
                     else:
                        saver = tf.train.Saver()
                        res = saver.save(sess, save_path)
-                    yield(_preds, losses, iterations, epoch)
+                    yield(_preds, losses, iterations, epoch, _lr,_global_step)
+                    #yield(_preds, losses, iterations, epoch)
 
 def _tensor_size(tensor):
     from operator import mul

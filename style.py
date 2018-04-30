@@ -7,17 +7,20 @@ from argparse import ArgumentParser
 from utils import save_img, get_img, exists, list_files
 import evaluate
 
-CONTENT_WEIGHT = 7.5e0
+CONTENT_WEIGHT = 7.5e1
 STYLE_WEIGHT = 1e2
 TV_WEIGHT = 2e2
-
-LEARNING_RATE = 1e-3
-NUM_EPOCHS = 2
-CHECKPOINT_DIR = 'checkpoints'
-CHECKPOINT_ITERATIONS = 2000
-VGG_PATH = 'data/imagenet-vgg-verydeep-19.mat'
-TRAIN_PATH = 'data/train2014'
-BATCH_SIZE = 4
+FCRS_WEIGHT = 0
+FCON_WEIGHT = 0
+FDIR_WEIGHT = 0
+LEARNING_RATE = 1.2e-3
+NUM_EPOCHS = 1500
+CHECKPOINT_DIR = 'checkpoint'
+CHECKPOINT_ITERATIONS = 1
+VGG_PATH = '/home/marshallee/Documents/pretrained-models/vgg/vgg19/imagenet-vgg-verydeep-19.mat'
+TRAIN_PATH = 'examples/target'
+STYLE_PATH = 'examples/style/wave.jpg'
+BATCH_SIZE = 1
 DEVICE = '/gpu:0'
 FRAC_GPU = 1
 
@@ -25,11 +28,11 @@ def build_parser():
     parser = ArgumentParser()
     parser.add_argument('--checkpoint-dir', type=str,
                         dest='checkpoint_dir', help='dir to save checkpoint in',
-                        metavar='CHECKPOINT_DIR', required=True)
+                        metavar='CHECKPOINT_DIR', default = CHECKPOINT_DIR)
 
     parser.add_argument('--style', type=str,
                         dest='style', help='style image path',
-                        metavar='STYLE', required=True)
+                        metavar='STYLE', default=STYLE_PATH)
 
     parser.add_argument('--train-path', type=str,
                         dest='train_path', help='path to training images folder',
@@ -79,6 +82,21 @@ def build_parser():
                         dest='tv_weight',
                         help='total variation regularization weight (default %(default)s)',
                         metavar='TV_WEIGHT', default=TV_WEIGHT)
+
+    parser.add_argument('--fcrs-weight', type=float,
+                        dest='fcrs_weight',
+                        help='coarseness weight (default %(default)s)',
+                        metavar='FCRS_WEIGHT', default=FCRS_WEIGHT)
+
+    parser.add_argument('--fcon-weight', type=float,
+                        dest='fcon_weight',
+                        help='contrast weight (default %(default)s)',
+                        metavar='FCON_WEIGHT', default=FCON_WEIGHT)
+
+    parser.add_argument('--fdir-weight', type=float,
+                        dest='fdir_weight',
+                        help='directionality (default %(default)s)',
+                        metavar='FDIR_WEIGHT', default=FDIR_WEIGHT)
     
     parser.add_argument('--learning-rate', type=float,
                         dest='learning_rate',
@@ -102,6 +120,9 @@ def check_opts(opts):
     assert opts.content_weight >= 0
     assert opts.style_weight >= 0
     assert opts.tv_weight >= 0
+    assert opts.fcrs_weight >= 0
+    assert opts.fcon_weight >= 0
+    assert opts.fdir_weight >= 0
     assert opts.learning_rate >= 0
 
 def _get_files(img_dir):
@@ -141,15 +162,19 @@ def main():
         options.content_weight,
         options.style_weight,
         options.tv_weight,
+        options.fcrs_weight,
+        options.fcon_weight,
+        options.fdir_weight,
         options.vgg_path
     ]
-
-    for preds, losses, i, epoch in optimize(*args, **kwargs):
-        style_loss, content_loss, tv_loss, loss = losses
-
-        print('Epoch %d, Iteration: %d, Loss: %s' % (epoch, i, loss))
-        to_print = (style_loss, content_loss, tv_loss)
-        print('style: %s, content:%s, tv: %s' % to_print)
+    cnt = 0
+    for preds, losses, i, epoch, lr, gs in optimize(*args, **kwargs):
+        style_loss, content_loss, tv_loss, fcrs_loss, fcon_loss, fdir_loss, loss = losses
+        print('cnt: %d' % cnt)
+        cnt += 1
+        print('Epoch %d, Iteration: %d, Loss: %s, Lr: %s, Gs: %s' % (epoch, i, loss, lr, gs))
+        to_print = (style_loss, content_loss, tv_loss, fcrs_loss, fcon_loss, fdir_loss)
+        print('style: %s, content:%s, tv: %s, fcrs_loss: %s, fcon_loss: %s, fdir_loss: %s' % to_print)
         if options.test:
             assert options.test_dir != False
             preds_path = '%s/%s_%s.png' % (options.test_dir,epoch,i)
@@ -158,10 +183,13 @@ def main():
                 evaluate.ffwd_to_img(options.test,preds_path,
                                      options.checkpoint_dir)
             else:
-                save_img(preds_path, img)
+                #save_img(preds_path, img)
+                save_img(preds_path, preds)
     ckpt_dir = options.checkpoint_dir
     cmd_text = 'python evaluate.py --checkpoint %s ...' % ckpt_dir
+    save_img('/home/marshallee/Documents/fast-style-transfer/examples/output/Step-wave-'+str(options.fcrs_weight)+'-'+str(options.fcon_weight)+'-'+str(options.fdir_weight)+'.jpg', np.squeeze(np.array(preds)))
     print("Training complete. For evaluation:\n    `%s`" % cmd_text)
+    print(str(options.fcrs_weight)+'-'+str(options.fcon_weight)+'-'+str(options.fdir_weight))
 
 if __name__ == '__main__':
     main()
